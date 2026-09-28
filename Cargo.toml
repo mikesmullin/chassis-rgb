@@ -1,0 +1,11 @@
+[package]
+name = "chassis-rgb"
+version = "0.1.0"
+edition = "2021"
+description = "Set TRX50 AERO D rev 1.2 chassis LEDs without OpenRGB"
+license = "MIT"
+publish = false
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+hidapi = { version = "2.6.3", default-features = false, features = ["linux-static-hidraw"] }

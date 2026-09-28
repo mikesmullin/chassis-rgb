@@ -1,3 +1,4 @@
+mod gpu;
 mod protocol;
 
 use std::process::ExitCode;
@@ -40,9 +41,13 @@ struct Cli {
     #[arg(long, default_value_t = 4)]
     speed: u8,
 
-    /// all, led, argb1, or argb2
+    /// all, led, argb1, or argb2 (chassis only)
     #[arg(long, default_value = "all")]
     zone: String,
+
+    /// chassis, gpu, or all
+    #[arg(long, default_value = "all")]
+    device: String,
 
     /// Write the current effect to controller flash (one CC 5E).
     #[arg(long)]
@@ -72,22 +77,51 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<String, String> {
+    let use_chassis = match cli.device.to_ascii_lowercase().as_str() {
+        "all" | "chassis" | "motherboard" | "strip" => true,
+        "gpu" => false,
+        other => return Err(format!("unknown device '{other}'. use all, chassis, or gpu")),
+    };
+    let use_gpu = match cli.device.to_ascii_lowercase().as_str() {
+        "all" | "gpu" => true,
+        "chassis" | "motherboard" | "strip" => false,
+        other => return Err(format!("unknown device '{other}'. use all, chassis, or gpu")),
+    };
     if cli.info {
-        if cli.dry_run {
-            let pkt = info_select_report();
-            eprintln!("info-select {}", hex(&pkt));
+        let mut parts = Vec::new();
+        if use_chassis {
+            if cli.dry_run {
+                let pkt = info_select_report();
+                eprintln!("info-select {}", hex(&pkt));
+            } else {
+                let dev = open_device()?;
+                let info = read_info(&dev)?;
+                require_board(&info)?;
+                parts.push(format!(
+                    "chassis product={} fw={} support_cmd_flag={} chip_id={:#010x}",
+                    info.product.replace(' ', "_"),
+                    info.fw,
+                    info.support_cmd_flag,
+                    info.chip_id
+                ));
+            }
+        }
+        if use_gpu {
+            if cli.dry_run {
+                eprintln!("gpu discovery skipped (dry-run)");
+            } else {
+                let mut gpu = gpu::Gpu::open()?;
+                let (direct, mode, speed, dir) = gpu.read_mode_regs()?;
+                parts.push(format!(
+                    "gpu version={} leds={} direct={direct:#04x} mode={mode:#04x} speed={speed:#04x} dir={dir:#04x}",
+                    gpu.version, gpu.led_count,
+                ));
+            }
+        }
+        if parts.is_empty() {
             return Ok("dry-run info".to_string());
         }
-        let dev = open_device()?;
-        let info = read_info(&dev)?;
-        require_board(&info)?;
-        return Ok(format!(
-            "info product={} fw={} support_cmd_flag={} chip_id={:#010x}",
-            info.product.replace(' ', "_"),
-            info.fw,
-            info.support_cmd_flag,
-            info.chip_id
-        ));
+        return Ok(format!("info {}", parts.join(" ")));
     }
 
     let mode = Mode::parse(&cli.mode).ok_or_else(|| {
@@ -129,18 +163,48 @@ fn run(cli: Cli) -> Result<String, String> {
         steps.push((save_report(), 20));
     }
 
-    if cli.dry_run {
-        for (pkt, _) in &steps {
-            eprintln!("{}", hex(pkt));
+    if use_chassis {
+        if cli.dry_run {
+            for (pkt, _) in &steps {
+                eprintln!("{}", hex(pkt));
+            }
+        } else {
+            let dev = open_device()?;
+            let info = read_info(&dev)?;
+            require_board(&info)?;
+            for (pkt, delay) in &steps {
+                dev.send_feature_report(pkt)
+                    .map_err(|e| format!("SET_FEATURE failed: {e}"))?;
+                thread::sleep(Duration::from_millis(*delay));
+            }
         }
-    } else {
-        let dev = open_device()?;
-        let info = read_info(&dev)?;
-        require_board(&info)?;
-        for (pkt, delay) in &steps {
-            dev.send_feature_report(pkt)
-                .map_err(|e| format!("SET_FEATURE failed: {e}"))?;
-            thread::sleep(Duration::from_millis(*delay));
+    }
+    if use_gpu {
+        // Chassis pulse/flash map onto the ENE breathing/flashing modes.
+        let gpu_mode = match mode {
+            Mode::Static => gpu::MODE_STATIC,
+            Mode::Pulse => gpu::MODE_BREATHING,
+            Mode::Flash => gpu::MODE_FLASHING,
+        };
+        if cli.dry_run {
+            eprintln!(
+                "gpu mode={gpu_mode} color={} brightness={} speed={}",
+                color.hex(),
+                cli.brightness,
+                cli.speed
+            );
+        } else {
+            let mut gpu = gpu::Gpu::open()?;
+            gpu.apply(
+                gpu_mode,
+                color.r,
+                color.g,
+                color.b,
+                cli.brightness,
+                cli.speed,
+                cli.save,
+            )
+            .map_err(|e| format!("GPU: {e}"))?;
         }
     }
 
@@ -151,12 +215,13 @@ fn run(cli: Cli) -> Result<String, String> {
         .join(",");
     let applied = protocol::effect_brightness(mode, cli.brightness);
     Ok(format!(
-        "ok mode={} color={} brightness={} speed={} zones={} saved={} dry_run={}",
+        "ok mode={} color={} brightness={} speed={} zones={} device={} saved={} dry_run={}",
         mode.name(),
         color.hex(),
         applied,
         cli.speed,
         zone_list,
+        cli.device.to_ascii_lowercase(),
         cli.save,
         cli.dry_run
     ))

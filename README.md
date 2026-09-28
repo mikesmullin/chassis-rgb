@@ -1,14 +1,17 @@
 # chassis-rgb
 
-CLI for the Gigabyte TRX50 AERO D rev 1.2 chassis LEDs. It talks only to the onboard IT5701 (`048d:5702`, chip id `0x57010100`). It does not control the GPU and does not start an SDK server.
+CLI for this machine's PC lights: the Gigabyte TRX50 AERO D rev 1.2 chassis LEDs (onboard IT5701, `048d:5702`, chip id `0x57010100`) and the ASUS ROG ASTRAL RTX 5090 OC WHITE GPU (ENE SMBus, `0x67`). It does not start an SDK server.
 
 ```
 chassis-rgb --mode static --color 280000 --brightness 50
 chassis-rgb --mode pulse --color 00FF00 --speed 4
 chassis-rgb --mode flash --color 00FFFF --speed 4
+chassis-rgb --device gpu --mode static --color 280000
 chassis-rgb --info
 chassis-rgb --mode static --color 280000 --brightness 50 --save
 ```
+
+`--device` is `all` (default), `chassis`, or `gpu`.
 
 Success is one stdout line and exit 0. Failures go to stderr and exit 1.
 
@@ -38,7 +41,9 @@ The tool refuses a `048d:5702` whose info report is not this IT5701. Another pro
 
 ## GPU
 
-Matching the GPU is a separate OpenRGB command. See `NOTES.md` for the ENE speed-register quirk: Breathing only accepts speed 0-4, and OpenRGB's percentage speed can write an invalid value that looks like a solid color.
+The GPU backend speaks the ENE SMBus protocol directly: effect colors, mode, speed, direction, apply, and the `0xAA` flash save. Chassis pulse/flash map onto the ENE breathing/flashing modes. The ENE speed register only accepts 0-4, so the 0-9 speed is scaled down (4 lands on normal). Brightness scales the color values; the chip has no brightness register.
+
+Only the exact version string seen on this card (`AUMA0-E6K5-1113`) is driven, with the V2 color registers and the config-table LED count. Anything else is refused. See `NOTES.md` for how that quirk was found: OpenRGB's percentage speed once wrote `0x28`, which selected Breathing and then did nothing.
 
 ## Build
 

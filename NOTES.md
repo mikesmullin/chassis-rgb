@@ -42,6 +42,10 @@ GPU Breathing is hardware, but its speed register only accepts 0 through 4 (0 fa
 
 After a reboot, `chassis-rgb` reported success but the strip stayed in rainbow. OpenRGB's static command worked on the same cold controller. A usbmon capture of OpenRGB showed the difference: it always sends a reset prefix first (zero registers `0x20`-`0x27`, `CC 28 FF 00`, `CC 31 00`, `CC 32 1B`), then interleaves header-enables (`1A` before ARGB_1, `18` before ARGB_2) with the effect packets, then a masked `CC 28 70` apply. The tool now sends that same sequence. Verified warm; a real reboot is still needed to confirm the cold path. USB re-enumeration does not reset the controller, so it cannot substitute for the reboot test.
 
+## GPU backend
+
+The GPU is an ENE chip at SMBus `0x67`, version `AUMA0-E6K5-1113`, 30 LEDs, V2 color registers at `0x8160`. Effect color order on the wire is R, B, G. Static, breathing, and flashing confirmed on the card. The tool refuses any other version string, mirroring official software's conservatism.
+
 ## Not done
 
 - No POST or cold-boot check after `--save`. Persistence is unconfirmed until the dim red is visible during firmware POST before the OS starts, with no OpenRGB reapply.

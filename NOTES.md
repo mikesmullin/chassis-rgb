@@ -12,7 +12,7 @@ The controller was passed through to the libvirt session domain `revm`. Detach t
 | static `280000` brightness 50 | Solid dim red. |
 | pulse `00FF00` brightness 80 speed 4, then speed 2 | Strip breathed green. |
 | flash `00FFFF` brightness 80 speed 4 | Strip blinked cyan. |
-| wave `FF8800` | Strip turned off. Do not send wave to this board. |
+| wave `FF8800` | Strip turned off. Wave was removed from the CLI. Do not send wave to this board. |
 | static `280000` brightness 50 `--save` | One `CC 5E` after the effect. Strip stayed red. POST persistence was not tested. |
 
 OpenRGB's motherboard mode list for this board is Static, Breathing, Flashing, Color Cycle, Double Flash, and Random. Wave is absent. Color Cycle and Double Flash were not tried.
@@ -37,6 +37,10 @@ OpenRGB still prints `Connection attempt failed` because its SDK client fails to
 Target the GPU by name or index and do not let OpenRGB open the Gigabyte USB detector while this CLI holds the chassis. Opening the motherboard controller switches it to Direct and freezes a running hardware effect.
 
 GPU Breathing is hardware, but its speed register only accepts 0 through 4 (0 fastest). OpenRGB's `--speed` percentage math can write an invalid value such as `0x28`, which selects Breathing and then does nothing. A direct register write of speed `0` made magenta breathing visible. Static color through `openrgb --device 0 --mode static` did work.
+
+## Cold-boot failure and fix
+
+After a reboot, `chassis-rgb` reported success but the strip stayed in rainbow. OpenRGB's static command worked on the same cold controller. A usbmon capture of OpenRGB showed the difference: it always sends a reset prefix first (zero registers `0x20`-`0x27`, `CC 28 FF 00`, `CC 31 00`, `CC 32 1B`), then interleaves header-enables (`1A` before ARGB_1, `18` before ARGB_2) with the effect packets, then a masked `CC 28 70` apply. The tool now sends that same sequence. Verified warm; a real reboot is still needed to confirm the cold path. USB re-enumeration does not reset the controller, so it cannot substitute for the reboot test.
 
 ## Not done
 

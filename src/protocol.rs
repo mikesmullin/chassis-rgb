@@ -14,12 +14,13 @@ pub const LED_C: u8 = 4;
 pub const ARGB_1: u8 = 5;
 pub const ARGB_2: u8 = 6;
 
+// Wave (6) is intentionally absent: this board does not offer it and the
+// packet blanks the strip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Static = 1,
     Pulse = 2,
     Flash = 3,
-    Wave = 6,
 }
 
 impl Mode {
@@ -28,7 +29,6 @@ impl Mode {
             "static" => Some(Self::Static),
             "pulse" | "breath" | "breathing" => Some(Self::Pulse),
             "flash" | "blink" | "blinking" => Some(Self::Flash),
-            "wave" => Some(Self::Wave),
             _ => None,
         }
     }
@@ -38,7 +38,6 @@ impl Mode {
             Self::Static => "static",
             Self::Pulse => "pulse",
             Self::Flash => "flash",
-            Self::Wave => "wave",
         }
     }
 }
@@ -135,13 +134,6 @@ pub fn effect_report(led: u8, mode: Mode, brightness: u8, speed: u8, color: Colo
             put_u16(&mut buf, 24, 100);
             put_u16(&mut buf, 26, u16::from(speed) * 200 + 700);
         }
-        Mode::Wave => {
-            let s = u16::from(speed) + 1;
-            let period = (s * s + s + 10) * 5 / 2;
-            put_u16(&mut buf, 22, period);
-            buf[30] = 7;
-            buf[31] = 1;
-        }
     }
     buf
 }
@@ -159,11 +151,59 @@ pub fn apply_report(zones: &[u8]) -> [u8; REPORT_LEN] {
     buf
 }
 
-/// Enable hardware effects on both digital headers (leave direct/custom mode).
-pub fn enable_headers_report() -> [u8; REPORT_LEN] {
+/// Cold-boot prefix, captured from official software traffic: clear the effect
+/// registers, commit the clear with a full apply, switch beat off. Without
+/// this a freshly booted controller stays in its POST effect and ignores the
+/// per-zone packets.
+pub fn reset_reports() -> Vec<[u8; REPORT_LEN]> {
+    let mut out = Vec::with_capacity(10);
+    for reg in 0x20u8..=0x27u8 {
+        let mut buf = [0u8; REPORT_LEN];
+        buf[0] = REPORT_ID;
+        buf[1] = reg;
+        out.push(buf);
+    }
+    let mut apply = [0u8; REPORT_LEN];
+    apply[0] = REPORT_ID;
+    apply[1] = 0x28;
+    apply[2] = 0xFF;
+    out.push(apply);
+    let mut beat = [0u8; REPORT_LEN];
+    beat[0] = REPORT_ID;
+    beat[1] = 0x31;
+    out.push(beat);
+    out
+}
+
+/// Header-enable writes matching official software on this layout, paired
+/// with the ARGB zone each one precedes. The baseline (0x1B: strip and gen2
+/// bits disabled) goes before the first ARGB effect packet. Enabling ARGB_1
+/// clears bit 0 (0x1A); enabling ARGB_2 then clears bit 1 (0x18, or 0x19
+/// when argb1 is not used). LED_C is a single zone and needs no write.
+pub fn header_enable_reports(zones: &[u8]) -> (Option<[u8; REPORT_LEN]>, Vec<(u8, [u8; REPORT_LEN])>) {
+    let mut mask = 0x1Bu8;
+    let mut paired = Vec::new();
+    for &led in zones {
+        if led == ARGB_1 {
+            mask &= !0x01;
+            paired.push((led, header_enable_report(mask)));
+        } else if led == ARGB_2 {
+            mask &= !0x02;
+            paired.push((led, header_enable_report(mask)));
+        }
+    }
+    if paired.is_empty() {
+        (None, paired)
+    } else {
+        (Some(header_enable_report(0x1B)), paired)
+    }
+}
+
+fn header_enable_report(mask: u8) -> [u8; REPORT_LEN] {
     let mut buf = [0u8; REPORT_LEN];
     buf[0] = REPORT_ID;
     buf[1] = 0x32;
+    buf[2] = mask;
     buf
 }
 
@@ -239,15 +279,36 @@ mod tests {
     }
 
     #[test]
-    fn flash_and_wave_periods() {
+    fn flash_periods() {
         let flash = effect_report(ARGB_2, Mode::Flash, 10, 4, Color { r: 0, g: 0, b: 0 });
         assert_eq!(flash[11], 3);
         assert_eq!(u16::from_le_bytes([flash[26], flash[27]]), 1500);
-        let wave = effect_report(ARGB_2, Mode::Wave, 10, 4, Color { r: 0, g: 0, b: 0 });
-        assert_eq!(wave[11], 6);
-        assert_eq!(u16::from_le_bytes([wave[22], wave[23]]), 100);
-        assert_eq!(wave[30], 7);
-        assert_eq!(wave[31], 1);
+    }
+
+    #[test]
+    fn reset_prefix_matches_capture() {
+        let reset = reset_reports();
+        assert_eq!(reset.len(), 10);
+        for (i, pkt) in reset.iter().take(8).enumerate() {
+            assert_eq!(pkt[0], 0xCC);
+            assert_eq!(pkt[1], 0x20 + i as u8);
+            assert!(pkt[2..].iter().all(|b| *b == 0));
+        }
+        assert_eq!(&reset[8][0..4], &[0xCC, 0x28, 0xFF, 0x00]);
+        assert_eq!(&reset[9][0..3], &[0xCC, 0x31, 0x00]);
+    }
+
+    #[test]
+    fn header_enable_sequence_matches_capture() {
+        let (baseline, paired) = header_enable_reports(&[LED_C, ARGB_1, ARGB_2]);
+        assert_eq!(baseline.unwrap()[2], 0x1B);
+        let pairs: Vec<(u8, u8)> = paired.iter().map(|(led, p)| (*led, p[2])).collect();
+        assert_eq!(pairs, vec![(ARGB_1, 0x1A), (ARGB_2, 0x18)]);
+        let (baseline, paired) = header_enable_reports(&[LED_C]);
+        assert!(baseline.is_none() && paired.is_empty());
+        let (baseline, paired) = header_enable_reports(&[ARGB_2]);
+        assert_eq!(baseline.unwrap()[2], 0x1B);
+        assert_eq!(paired[0].1[2], 0x19);
     }
 
     #[test]

@@ -8,10 +8,10 @@ use clap::Parser;
 use hidapi::HidApi;
 
 use protocol::{
-    apply_report, effect_report, enable_headers_report, info_select_report, is_this_board,
-    parse_info, save_report, zone_name, zones_from_name, Color, Mode, PID, REPORT_ID, REPORT_LEN,
-    VID,
-};
+    apply_report, effect_report, header_enable_reports, info_select_report, is_this_board,
+    parse_info, reset_reports, save_report, zone_name, zones_from_name, Color, Mode, PID,
+    REPORT_ID, REPORT_LEN, VID,
+}; 
 
 #[derive(Parser, Debug)]
 #[command(
@@ -19,11 +19,12 @@ use protocol::{
     about = "Set TRX50 AERO D rev 1.2 chassis LEDs (IT5701, 048d:5702). Does not touch the GPU.",
     after_help = "\
 Speed is 0 (fastest) through 9 (slowest), default 4. Brightness is 0-255; pulse is capped at 100.
+Every apply starts with the reset prefix official software sends, so a cold controller leaves its POST effect.
 --save sends one CC 5E flash commit. Persistence through POST is not yet confirmed.
 Do not pass --save on every color change."
 )]
 struct Cli {
-    /// static, pulse, flash, or wave
+    /// static, pulse, or flash (wave is unsupported on this board)
     #[arg(long, default_value = "static")]
     mode: String,
 
@@ -90,7 +91,10 @@ fn run(cli: Cli) -> Result<String, String> {
     }
 
     let mode = Mode::parse(&cli.mode).ok_or_else(|| {
-        format!("unknown mode '{}'. use static, pulse, flash, or wave", cli.mode)
+        format!(
+            "unknown mode '{}'. use static, pulse, or flash (wave is unsupported on this board)",
+            cli.mode
+        )
     })?;
     let color = Color::parse(&cli.color)
         .ok_or_else(|| format!("color '{}' is not a 6-digit hex RRGGBB", cli.color))?;
@@ -100,30 +104,43 @@ fn run(cli: Cli) -> Result<String, String> {
     let zones = zones_from_name(&cli.zone)
         .ok_or_else(|| format!("unknown zone '{}'. use all, led, argb1, or argb2", cli.zone))?;
 
-    let mut reports = Vec::new();
-    if zones.iter().any(|z| *z == protocol::ARGB_1 || *z == protocol::ARGB_2) {
-        reports.push(enable_headers_report());
+    // Sequence mirrors official software traffic: reset prefix, then per-zone
+    // header-enables interleaved with effect packets, then a masked apply.
+    // Each entry carries the settle delay after it is sent.
+    let mut steps: Vec<([u8; REPORT_LEN], u64)> = Vec::new();
+    for pkt in reset_reports() {
+        let delay = if pkt[1] == 0x28 { 50 } else { 20 };
+        steps.push((pkt, delay));
+    }
+    let (baseline, paired) = header_enable_reports(&zones);
+    if let Some(pkt) = baseline {
+        steps.push((pkt, 50));
     }
     for &led in &zones {
-        reports.push(effect_report(led, mode, cli.brightness, cli.speed, color));
+        for (zone, pkt) in &paired {
+            if *zone == led {
+                steps.push((*pkt, 50));
+            }
+        }
+        steps.push((effect_report(led, mode, cli.brightness, cli.speed, color), 20));
     }
-    reports.push(apply_report(&zones));
+    steps.push((apply_report(&zones), 20));
     if cli.save {
-        reports.push(save_report());
+        steps.push((save_report(), 20));
     }
 
     if cli.dry_run {
-        for pkt in &reports {
+        for (pkt, _) in &steps {
             eprintln!("{}", hex(pkt));
         }
     } else {
         let dev = open_device()?;
         let info = read_info(&dev)?;
         require_board(&info)?;
-        for pkt in &reports {
+        for (pkt, delay) in &steps {
             dev.send_feature_report(pkt)
                 .map_err(|e| format!("SET_FEATURE failed: {e}"))?;
-            thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(*delay));
         }
     }
 

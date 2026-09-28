@@ -16,7 +16,7 @@ Success is one stdout line and exit 0. Failures go to stderr and exit 1.
 
 `static`, `pulse`, and `flash` were confirmed on the strip.
 
-`wave` is accepted by the CLI but this board does not support it. Sending it turned the strip off. Do not use it here. OpenRGB advertises Color Cycle and Double Flash as well; those have not been tried.
+`wave` is rejected: this board does not offer it and the packet blanked the strip during testing. OpenRGB advertises Color Cycle and Double Flash as well; those have not been tried.
 
 Zones: `led`, `argb1` (ARGB_V2_1 and ARGB_V2_3 share one header), `argb2`, or `all`. On this case the visible strip is that onboard lighting. There is not a separate small LED to judge.
 
@@ -27,6 +27,10 @@ Brightness is 0-255. Pulse is capped at 100. Speed is 0 (fastest) through 9 (slo
 `--save` sends one `CC 5E` after the effect, the same report GCC's `SaveSetting()` sends. It is off by default. Do not pass it on every color change.
 
 One save of static `280000` was sent. The strip stayed red. Survival across reboot is not confirmed. Check the color during BIOS/POST before the OS starts, then after a cold boot, with no software reapply.
+
+## Cold boot
+
+After a reboot the controller sits in its POST effect and used to ignore this tool's packets. Every apply now starts with the same reset prefix official software sends (clear effect registers `0x20`-`0x27`, full apply, beat off, header-enable baseline), captured over USB. The fix is verified on a warm controller; confirming it from a true cold boot still needs a reboot.
 
 ## Device access
 
